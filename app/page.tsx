@@ -32,16 +32,20 @@ type SavedEntry = {
 };
 type SavedMap = Record<string, SavedEntry>;
 
+type Provider = {
+  provider_id: number;
+  provider_name: string;
+  logo_path: string | null;
+};
+
+type ProviderMap = Record<string, { region: string; providers: Provider[] }>;
+
 /* =======================
    Storage keys
    ======================= */
 
 const STORAGE_STATUS = "watchcheck_status_v2";
 const STORAGE_SAVED = "watchcheck_saved_v2";
-
-// Compat keys (por si vienes de versiones anteriores)
-const OLD_STORAGE_ITEMS = "watchcheck_items_v1"; // map key->Result
-const OLD_STORAGE_WATCHED = "watchcheck_watched_v1"; // map key->ts (visto)
 
 /* =======================
    Helpers
@@ -68,6 +72,10 @@ function posterUrl(path?: string | null) {
   return path ? `https://image.tmdb.org/t/p/w342${path}` : null;
 }
 
+function providerLogoUrl(logoPath?: string | null) {
+  return logoPath ? `https://image.tmdb.org/t/p/w45${logoPath}` : null;
+}
+
 function getStatusLabel(s: Status | null) {
   if (s === "watched") return "Visto";
   if (s === "started") return "Empezado";
@@ -90,12 +98,13 @@ function PosterSkeleton() {
       <div className="aspect-[2/3] rounded-xl border border-white/10 bg-white/10" />
       <div className="mt-2 h-4 w-4/5 rounded bg-white/10" />
       <div className="mt-1 h-3 w-2/5 rounded bg-white/10" />
+      <div className="mt-2 h-6 w-3/5 rounded bg-white/10" />
     </div>
   );
 }
 
 /* =======================
-   Modal (Trakt)
+   Modal
    ======================= */
 
 function Modal({
@@ -112,20 +121,13 @@ function Modal({
   if (!open) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 grid place-items-center px-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-    >
+    <div className="fixed inset-0 z-50 grid place-items-center px-4" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-black/70" onClick={onClose} />
       <div className="relative w-full max-w-xl rounded-2xl border border-white/10 bg-[#0f1115] shadow-2xl">
         <div className="flex items-start justify-between gap-4 border-b border-white/10 p-4">
           <div>
             <div className="text-base font-black text-white">{title}</div>
-            <div className="mt-1 text-sm text-zinc-400">
-              Esto deja claro el camino para hacerlo escalable.
-            </div>
+            <div className="mt-1 text-sm text-zinc-400">Estructura lista para escalar.</div>
           </div>
           <button
             onClick={onClose}
@@ -134,7 +136,6 @@ function Modal({
             Cerrar
           </button>
         </div>
-
         <div className="p-4">{children}</div>
       </div>
     </div>
@@ -167,13 +168,17 @@ export default function Home() {
   const [statusMap, setStatusMap] = useState<StatusMap>({});
   const [saved, setSaved] = useState<SavedMap>({});
 
+  // Providers
+  const [providerMap, setProviderMap] = useState<ProviderMap>({});
+  const REGION = "ES";
+
   // 🎲 No sé qué ver hoy
   const [pick, setPick] = useState<Result | null>(null);
 
-  // Trakt modal / demo integration
+  // Trakt modal
   const [showIntegrations, setShowIntegrations] = useState(false);
 
-  /* ===== Load localStorage + migraciones ===== */
+  /* ===== Load localStorage ===== */
   useEffect(() => {
     try {
       const s = localStorage.getItem(STORAGE_STATUS);
@@ -183,43 +188,6 @@ export default function Home() {
     try {
       const sv = localStorage.getItem(STORAGE_SAVED);
       if (sv) setSaved(JSON.parse(sv));
-    } catch {}
-
-    // Migrar antiguos "items" (biblioteca)
-    try {
-      const oldItems = localStorage.getItem(OLD_STORAGE_ITEMS);
-      if (oldItems) {
-        const parsed = JSON.parse(oldItems) as Record<string, Result>;
-        if (parsed && typeof parsed === "object") {
-          setSaved((prev) => {
-            if (Object.keys(prev).length > 0) return prev;
-            const next: SavedMap = {};
-            const now = Date.now();
-            for (const [k, item] of Object.entries(parsed)) {
-              next[k] = { item, list: "library", addedTs: now };
-            }
-            return next;
-          });
-        }
-      }
-    } catch {}
-
-    // Migrar antiguos "watched"
-    try {
-      const oldWatched = localStorage.getItem(OLD_STORAGE_WATCHED);
-      if (oldWatched) {
-        const parsed = JSON.parse(oldWatched) as Record<string, number>;
-        if (parsed && typeof parsed === "object") {
-          setStatusMap((prev) => {
-            if (Object.keys(prev).length > 0) return prev;
-            const next: StatusMap = {};
-            for (const [k, ts] of Object.entries(parsed)) {
-              next[k] = { status: "watched", ts: typeof ts === "number" ? ts : Date.now() };
-            }
-            return next;
-          });
-        }
-      }
     } catch {}
   }, []);
 
@@ -315,10 +283,6 @@ export default function Home() {
     setStatusMap({});
     setSaved({});
     setPick(null);
-    try {
-      localStorage.removeItem(OLD_STORAGE_ITEMS);
-      localStorage.removeItem(OLD_STORAGE_WATCHED);
-    } catch {}
   }
 
   function exportData() {
@@ -343,37 +307,12 @@ export default function Home() {
     reader.onload = () => {
       try {
         const parsed = JSON.parse(String(reader.result || "{}"));
-
-        // Compat backup antiguo: watched + savedItems
-        if (parsed?.watched && parsed?.savedItems && !parsed?.saved) {
-          const oldWatched = parsed.watched as Record<string, number>;
-          const oldItems = parsed.savedItems as Record<string, Result>;
-
-          const nextStatus: StatusMap = {};
-          for (const [k, ts] of Object.entries(oldWatched || {})) {
-            nextStatus[k] = { status: "watched", ts: typeof ts === "number" ? ts : Date.now() };
-          }
-
-          const nextSaved: SavedMap = {};
-          const now = Date.now();
-          for (const [k, item] of Object.entries(oldItems || {})) {
-            nextSaved[k] = { item, list: "library", addedTs: now };
-          }
-
-          setStatusMap(nextStatus);
-          setSaved(nextSaved);
-          alert("Importación OK ✅ (migrado desde backup antiguo)");
-          return;
-        }
-
-        // v2
         const nextStatus = parsed?.statusMap ?? {};
         const nextSaved = parsed?.saved ?? {};
         if (typeof nextStatus !== "object" || typeof nextSaved !== "object") {
           alert("Archivo inválido (estructura incorrecta).");
           return;
         }
-
         setStatusMap(nextStatus);
         setSaved(nextSaved);
         alert("Importación OK ✅");
@@ -389,6 +328,36 @@ export default function Home() {
     if (!file) return;
     importDataFromFile(file);
     e.target.value = "";
+  }
+
+  /* =======================
+     Providers (logos)
+     ======================= */
+
+  async function ensureProviders(r: Result) {
+    const k = makeKey(r);
+    if (providerMap[k]) return;
+
+    try {
+      const res = await fetch(
+        `/api/tmdb/providers?type=${encodeURIComponent(r.media_type)}&id=${encodeURIComponent(
+          String(r.id)
+        )}&region=${encodeURIComponent(REGION)}`,
+        { cache: "no-store" }
+      );
+      const data = await res.json();
+      if (!res.ok) return;
+
+      setProviderMap((prev) => ({
+        ...prev,
+        [k]: {
+          region: data.region || REGION,
+          providers: Array.isArray(data.providers) ? data.providers : [],
+        },
+      }));
+    } catch {
+      // silenciar (no bloquea UI)
+    }
   }
 
   /* =======================
@@ -489,14 +458,12 @@ export default function Home() {
      ======================= */
 
   function pickRandomFromCurrentTab() {
-    const source =
-      tab === "watchlist" ? watchlistItems : tab === "library" ? libraryItems : watchlistItems;
+    const source = tab === "watchlist" ? watchlistItems : libraryItems;
 
     const candidates = source
       .filter((x) => listMatchesQuery(x.item))
       .filter((x) => {
         const s = getStatus(x.key);
-        // preferimos NO VISTO siempre (si filtro=todas, elegimos no visto)
         if (filter === "todas") return s === null;
         if (filter === "no_visto") return s === null;
         if (filter === "empezado") return s === "started";
@@ -529,7 +496,7 @@ export default function Home() {
     return (
       <button
         onClick={onClick}
-        className={`rounded-full px-4 py-2 text-sm font-semibold transition border ${
+        className={`rounded-full px-3 py-2 text-sm font-semibold transition border ${
           active
             ? "bg-white/10 text-white border-white/15"
             : "bg-transparent text-zinc-300 border-white/10 hover:bg-white/5"
@@ -537,6 +504,45 @@ export default function Home() {
       >
         {children}
       </button>
+    );
+  }
+
+  function ProvidersRow({ r }: { r: Result }) {
+    const k = makeKey(r);
+    const entry = providerMap[k];
+    const providers = entry?.providers || [];
+
+    // no bloqueamos render: si no existe aún, lo pedimos
+    useEffect(() => {
+      if (!providerMap[k]) ensureProviders(r);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [k]);
+
+    if (!providers.length) return null;
+
+    // mostramos hasta 5 logos
+    const shown = providers.slice(0, 5);
+
+    return (
+      <div className="mt-2 flex items-center gap-2">
+        <div className="text-[11px] text-zinc-500">Ver en:</div>
+        <div className="flex items-center gap-1.5">
+          {shown.map((p) => {
+            const logo = providerLogoUrl(p.logo_path);
+            if (!logo) return null;
+            return (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                key={p.provider_id}
+                src={logo}
+                alt={p.provider_name}
+                title={p.provider_name}
+                className="h-6 w-6 rounded-md border border-white/10 bg-white/5 p-1"
+              />
+            );
+          })}
+        </div>
+      </div>
     );
   }
 
@@ -615,8 +621,7 @@ export default function Home() {
                 Quitar estado
               </button>
 
-              {/* Watchlist / Library actions */}
-              {context === "search" || context === "reco" ? (
+              {(context === "search" || context === "reco") && (
                 <>
                   <button
                     onClick={() => upsertSaved(r, "watchlist")}
@@ -631,27 +636,27 @@ export default function Home() {
                     ➕ Biblioteca
                   </button>
                 </>
-              ) : null}
+              )}
 
-              {inSaved ? (
+              {inSaved && (
                 <>
-                  {inWatchlist ? (
+                  {inWatchlist && (
                     <button
                       onClick={() => upsertSaved(r, "library")}
                       className="rounded-lg px-3 py-2 text-xs font-semibold border border-white/10 bg-white/5 text-zinc-100 hover:bg-white/10"
                     >
                       Mover a Biblioteca
                     </button>
-                  ) : null}
+                  )}
 
-                  {inLibrary ? (
+                  {inLibrary && (
                     <button
                       onClick={() => upsertSaved(r, "watchlist")}
                       className="rounded-lg px-3 py-2 text-xs font-semibold border border-white/10 bg-white/5 text-zinc-100 hover:bg-white/10"
                     >
                       Mover a Watchlist
                     </button>
-                  ) : null}
+                  )}
 
                   <button
                     onClick={() => removeSaved(k)}
@@ -660,7 +665,7 @@ export default function Home() {
                     Quitar de lista
                   </button>
                 </>
-              ) : null}
+              )}
             </div>
           </div>
         </div>
@@ -675,6 +680,9 @@ export default function Home() {
             {inWatchlist ? <span className="ml-2 text-zinc-500">• Watchlist</span> : null}
             {inLibrary ? <span className="ml-2 text-zinc-500">• Biblioteca</span> : null}
           </div>
+
+          {/* Logos plataformas */}
+          <ProvidersRow r={r} />
         </div>
       </div>
     );
@@ -686,7 +694,6 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#0f1115] text-white">
-      {/* Trakt / Integrations modal */}
       <Modal open={showIntegrations} title="Conectar Trakt (escalable)" onClose={() => setShowIntegrations(false)}>
         <div className="space-y-4 text-zinc-300">
           <div className="rounded-xl border border-white/10 bg-white/5 p-3">
@@ -697,47 +704,23 @@ export default function Home() {
               <li>Base sólida para “conectar plataformas” de forma realista (hub).</li>
             </ul>
           </div>
-
-          <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-            <div className="font-bold text-white">Por qué Netflix/Prime/Disney es complicado</div>
-            <div className="mt-2 text-sm text-zinc-300">
-              No suelen tener una API pública estándar para que una app lea tu historial “visto”.
-              Lo viable es: <span className="font-semibold text-white">Trakt</span> como hub, importadores, o extensión (opcional).
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-            <div className="font-bold text-white">Siguiente paso técnico (cuando quieras)</div>
-            <div className="mt-2 text-sm text-zinc-300">
-              Implementar OAuth con Trakt, guardar tokens y sincronizar estados desde servidor.
-              (Hoy lo dejamos como demo visual para enseñarlo).
-            </div>
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            <button
-              onClick={() => alert("Demo: botón listo. Siguiente fase: OAuth real con Trakt.")}
-              className="rounded-xl bg-white text-black px-4 py-2 text-sm font-black hover:bg-zinc-200"
-            >
-              Simular “Conectar”
-            </button>
-            <button
-              onClick={() => setShowIntegrations(false)}
-              className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-bold text-zinc-100 hover:bg-white/10"
-            >
-              Vale
-            </button>
-          </div>
+          <button
+            onClick={() => setShowIntegrations(false)}
+            className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-bold text-zinc-100 hover:bg-white/10"
+          >
+            Vale
+          </button>
         </div>
       </Modal>
 
-      {/* Header */}
+      {/* Header (optimizado móvil) */}
       <header className="sticky top-0 z-10 border-b border-white/10 bg-[#0f1115]/80 backdrop-blur">
-        <div className="mx-auto max-w-6xl px-5 py-4">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            {/* Logo + name (NO WC) */}
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-xl border border-white/10 bg-white/5 grid place-items-center">
+        <div className="mx-auto max-w-6xl px-4 sm:px-5 py-4">
+          {/* fila 1 */}
+          <div className="flex items-start justify-between gap-3">
+            {/* Logo */}
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="h-10 w-10 rounded-xl border border-white/10 bg-white/5 grid place-items-center shrink-0">
                 <svg
                   viewBox="0 0 24 24"
                   className="h-6 w-6 text-white/90"
@@ -751,61 +734,109 @@ export default function Home() {
                   <path d="M20 6L9 17l-5-5" />
                 </svg>
               </div>
-              <div className="leading-tight">
-                <div className="text-lg font-black tracking-tight">WatchCheck</div>
-                <div className="text-xs text-zinc-400">Tu control de “visto” por plataforma</div>
+
+              <div className="min-w-0">
+                <div className="truncate text-lg font-black tracking-tight">WatchCheck</div>
+                <div className="hidden sm:block text-xs text-zinc-400">
+                  Tu control de “visto” + plataformas
+                </div>
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-semibold text-zinc-200">
-                📚 {counts.libraryCount}
-              </span>
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-semibold text-zinc-200">
-                🧾 {counts.watchlistCount}
-              </span>
-              <span className="rounded-full border border-green-500/25 bg-green-500/10 px-3 py-1.5 text-sm font-semibold text-green-100">
-                ✅ {counts.watched}
-              </span>
-              <span className="rounded-full border border-yellow-500/25 bg-yellow-500/10 px-3 py-1.5 text-sm font-semibold text-yellow-100">
-                🟨 {counts.started}
-              </span>
-
-              {/* Trakt button (demo) */}
+            {/* Acciones: en móvil, agrupadas */}
+            <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => setShowIntegrations(true)}
-                className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
+                className="hidden sm:inline-flex rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
               >
-                🔗 Conectar Trakt
+                🔗 Trakt
               </button>
 
-              <button
-                onClick={exportData}
-                className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
-              >
-                Exportar
-              </button>
+              {/* Menú móvil */}
+              <details className="sm:hidden">
+                <summary className="list-none cursor-pointer rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10">
+                  ⋯
+                </summary>
+                <div className="absolute right-4 mt-2 w-52 rounded-2xl border border-white/10 bg-[#0f1115] shadow-2xl p-2">
+                  <button
+                    onClick={() => setShowIntegrations(true)}
+                    className="w-full text-left rounded-xl px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
+                  >
+                    🔗 Conectar Trakt
+                  </button>
+                  <button
+                    onClick={exportData}
+                    className="w-full text-left rounded-xl px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
+                  >
+                    Exportar
+                  </button>
+                  <label className="block cursor-pointer rounded-xl px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10">
+                    Importar
+                    <input
+                      type="file"
+                      accept="application/json"
+                      className="hidden"
+                      onChange={onImportInputChange}
+                    />
+                  </label>
+                  <button
+                    onClick={clearAll}
+                    className="w-full text-left rounded-xl px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
+                  >
+                    Borrar todo
+                  </button>
+                </div>
+              </details>
 
-              <label className="cursor-pointer rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10">
-                Importar
-                <input
-                  type="file"
-                  accept="application/json"
-                  className="hidden"
-                  onChange={onImportInputChange}
-                />
-              </label>
+              {/* Desktop actions */}
+              <div className="hidden sm:flex items-center gap-2">
+                <button
+                  onClick={exportData}
+                  className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
+                >
+                  Exportar
+                </button>
 
-              <button
-                onClick={clearAll}
-                className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
-              >
-                Borrar todo
-              </button>
+                <label className="cursor-pointer rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10">
+                  Importar
+                  <input
+                    type="file"
+                    accept="application/json"
+                    className="hidden"
+                    onChange={onImportInputChange}
+                  />
+                </label>
+
+                <button
+                  onClick={clearAll}
+                  className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
+                >
+                  Borrar todo
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* Tabs + filter */}
+          {/* fila 2: contadores (scroll en móvil) */}
+          <div className="mt-3 flex gap-2 overflow-x-auto no-scrollbar pb-1">
+            <span className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-semibold text-zinc-200">
+              📚 {counts.libraryCount}
+            </span>
+            <span className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-semibold text-zinc-200">
+              🧾 {counts.watchlistCount}
+            </span>
+            <span className="shrink-0 rounded-full border border-green-500/25 bg-green-500/10 px-3 py-1.5 text-sm font-semibold text-green-100">
+              ✅ {counts.watched}
+            </span>
+            <span className="shrink-0 rounded-full border border-yellow-500/25 bg-yellow-500/10 px-3 py-1.5 text-sm font-semibold text-yellow-100">
+              🟨 {counts.started}
+            </span>
+            <span className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-semibold text-zinc-400">
+              🇪🇸 Providers: {REGION}
+            </span>
+          </div>
+
+          {/* tabs + filtro (wrap en móvil) */}
           <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
             <div className="flex flex-wrap gap-2">
               <TabButton active={tab === "buscar"} onClick={() => setTab("buscar")}>
@@ -863,7 +894,7 @@ export default function Home() {
           {tab === "buscar" && (
             <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
               <input
-                className="w-full flex-1 rounded-2xl border border-white/10 bg-white/5 px-5 py-4 text-base font-semibold text-white placeholder:text-zinc-500 outline-none focus:border-white/20"
+                className="w-full flex-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 sm:px-5 sm:py-4 text-base font-semibold text-white placeholder:text-zinc-500 outline-none focus:border-white/20"
                 placeholder="Buscar: Matrix, Dune, Breaking Bad…"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
@@ -872,7 +903,7 @@ export default function Home() {
               <button
                 onClick={search}
                 disabled={loading}
-                className="rounded-2xl bg-white text-black px-6 py-4 font-black hover:bg-zinc-200 disabled:opacity-60"
+                className="rounded-2xl bg-white text-black px-6 py-3 sm:py-4 font-black hover:bg-zinc-200 disabled:opacity-60"
               >
                 {loading ? "Buscando…" : "Buscar"}
               </button>
@@ -883,7 +914,7 @@ export default function Home() {
           {(tab === "watchlist" || tab === "library") && (
             <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
               <input
-                className="w-full flex-1 rounded-2xl border border-white/10 bg-white/5 px-5 py-4 text-base font-semibold text-white placeholder:text-zinc-500 outline-none focus:border-white/20"
+                className="w-full flex-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 sm:px-5 sm:py-4 text-base font-semibold text-white placeholder:text-zinc-500 outline-none focus:border-white/20"
                 placeholder={tab === "watchlist" ? "Buscar en Watchlist…" : "Buscar en Biblioteca…"}
                 value={listQuery}
                 onChange={(e) => {
@@ -893,7 +924,7 @@ export default function Home() {
               />
               <button
                 onClick={pickRandomFromCurrentTab}
-                className="rounded-2xl border border-white/10 bg-white/5 px-6 py-4 font-black text-zinc-100 hover:bg-white/10"
+                className="rounded-2xl border border-white/10 bg-white/5 px-6 py-3 sm:py-4 font-black text-zinc-100 hover:bg-white/10"
               >
                 🎲 No sé qué ver hoy
               </button>
@@ -903,25 +934,7 @@ export default function Home() {
       </header>
 
       {/* Content */}
-      <section className="mx-auto max-w-6xl px-5 py-8">
-        {/* Roadmap / story for friends (clean + demo) */}
-        <div className="mb-6 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-zinc-300">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <div className="font-black text-white">Demo hoy (escalable)</div>
-              <div className="mt-1 text-zinc-400">
-                Base: TMDB + UX. Escalado: Trakt (sync en la nube) + importadores.
-              </div>
-            </div>
-            <button
-              onClick={() => setShowIntegrations(true)}
-              className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-bold text-zinc-100 hover:bg-white/10"
-            >
-              Ver “Integraciones”
-            </button>
-          </div>
-        </div>
-
+      <section className="mx-auto max-w-6xl px-4 sm:px-5 py-8">
         {/* Picker result */}
         {(tab === "watchlist" || tab === "library") && pick && (
           <div className="mb-6 rounded-2xl border border-white/10 bg-white/5 p-4">
@@ -1003,9 +1016,9 @@ export default function Home() {
           <div className="text-zinc-400">Sin recomendaciones (por ahora).</div>
         )}
 
-        {/* Grids */}
+        {/* Grids (móvil: 3 columnas) */}
         {tab === "buscar" && (
-          <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+          <div className="mt-4 grid grid-cols-3 gap-3 sm:grid-cols-4 sm:gap-4 md:grid-cols-5 lg:grid-cols-6">
             {loading
               ? Array.from({ length: 12 }).map((_, i) => <PosterSkeleton key={`s-${i}`} />)
               : results.map((r) => <PosterCard key={makeKey(r)} r={r} context="search" />)}
@@ -1013,7 +1026,7 @@ export default function Home() {
         )}
 
         {tab === "watchlist" && (
-          <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+          <div className="mt-4 grid grid-cols-3 gap-3 sm:grid-cols-4 sm:gap-4 md:grid-cols-5 lg:grid-cols-6">
             {watchlistItems
               .filter((x) => matchesFilterByKey(x.key))
               .filter((x) => listMatchesQuery(x.item))
@@ -1024,7 +1037,7 @@ export default function Home() {
         )}
 
         {tab === "library" && (
-          <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+          <div className="mt-4 grid grid-cols-3 gap-3 sm:grid-cols-4 sm:gap-4 md:grid-cols-5 lg:grid-cols-6">
             {libraryItems
               .filter((x) => matchesFilterByKey(x.key))
               .filter((x) => listMatchesQuery(x.item))
@@ -1049,7 +1062,7 @@ export default function Home() {
               </button>
             </div>
 
-            <div className="mt-2 grid grid-cols-2 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+            <div className="mt-2 grid grid-cols-3 gap-3 sm:grid-cols-4 sm:gap-4 md:grid-cols-5 lg:grid-cols-6">
               {recoLoading
                 ? Array.from({ length: 12 }).map((_, i) => <PosterSkeleton key={`r-${i}`} />)
                 : reco
@@ -1059,6 +1072,17 @@ export default function Home() {
           </>
         )}
       </section>
+
+      {/* helper: hide scrollbar */}
+      <style jsx global>{`
+        .no-scrollbar::-webkit-scrollbar {
+          display: none;
+        }
+        .no-scrollbar {
+          -ms-overflow-style: none;
+          scrollbar-width: none;
+        }
+      `}</style>
     </main>
   );
 }
