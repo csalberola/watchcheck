@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 /* =======================
-   Types
-   ======================= */
+   TYPES
+======================= */
 
 type MediaType = "movie" | "tv";
 
@@ -17,20 +17,9 @@ type Result = {
   first_air_date?: string;
   poster_path?: string;
   vote_average?: number;
-  popularity?: number;
 };
 
 type Status = "started" | "watched";
-type StatusEntry = { status: Status; ts: number };
-type StatusMap = Record<string, StatusEntry>;
-
-type ListType = "library" | "watchlist";
-type SavedEntry = {
-  item: Result;
-  list: ListType;
-  addedTs: number;
-};
-type SavedMap = Record<string, SavedEntry>;
 
 type Provider = {
   provider_id: number;
@@ -38,1051 +27,287 @@ type Provider = {
   logo_path: string | null;
 };
 
-type ProviderMap = Record<string, { region: string; providers: Provider[] }>;
+type ProviderEntry = {
+  region: string;
+  link: string | null;
+  providers: Provider[];
+};
 
 /* =======================
-   Storage keys
-   ======================= */
+   CONSTANTS
+======================= */
 
-const STORAGE_STATUS = "watchcheck_status_v2";
-const STORAGE_SAVED = "watchcheck_saved_v2";
-
-/* =======================
-   Helpers
-   ======================= */
-
-function makeKey(r: Pick<Result, "media_type" | "id">) {
-  return `${r.media_type}:${r.id}`;
-}
-
-function titleOf(r: Result) {
-  return r.title || r.name || "(Sin título)";
-}
-
-function yearOf(r: Result) {
-  const d = r.release_date || r.first_air_date || "";
-  return d ? d.slice(0, 4) : "—";
-}
-
-function labelOf(r: Result) {
-  return r.media_type === "movie" ? "Movie" : "TV";
-}
-
-function posterUrl(path?: string | null) {
-  return path ? `https://image.tmdb.org/t/p/w342${path}` : null;
-}
-
-function providerLogoUrl(logoPath?: string | null) {
-  return logoPath ? `https://image.tmdb.org/t/p/w45${logoPath}` : null;
-}
-
-function getStatusLabel(s: Status | null) {
-  if (s === "watched") return "Visto";
-  if (s === "started") return "Empezado";
-  return "No visto";
-}
-
-function badgeCls(s: Status | null) {
-  if (s === "watched") return "bg-green-500/20 text-green-200 border-green-500/30";
-  if (s === "started") return "bg-yellow-500/20 text-yellow-200 border-yellow-500/30";
-  return "bg-white/10 text-zinc-200 border-white/20";
-}
+const REGION = "ES";
+const STORAGE_STATUS = "watchcheck_status";
+const STORAGE_LISTS = "watchcheck_lists";
 
 /* =======================
-   Skeleton
-   ======================= */
+   HELPERS
+======================= */
 
-function PosterSkeleton() {
-  return (
-    <div className="animate-pulse">
-      <div className="aspect-[2/3] rounded-xl border border-white/10 bg-white/10" />
-      <div className="mt-2 h-4 w-4/5 rounded bg-white/10" />
-      <div className="mt-1 h-3 w-2/5 rounded bg-white/10" />
-      <div className="mt-2 h-6 w-3/5 rounded bg-white/10" />
-    </div>
+const keyOf = (r: Result) => `${r.media_type}:${r.id}`;
+const titleOf = (r: Result) => r.title || r.name || "Sin título";
+const yearOf = (r: Result) =>
+  (r.release_date || r.first_air_date || "").slice(0, 4) || "—";
+
+const posterUrl = (p?: string) =>
+  p ? `https://image.tmdb.org/t/p/w342${p}` : null;
+
+const providerLogo = (p?: string | null) =>
+  p ? `https://image.tmdb.org/t/p/w45${p}` : null;
+
+/* =======================
+   MAIN
+======================= */
+
+export default function Page() {
+  /* -------- state -------- */
+  const [tab, setTab] = useState<"search" | "watchlist" | "library" | "reco">(
+    "search"
   );
-}
-
-/* =======================
-   Modal
-   ======================= */
-
-function Modal({
-  open,
-  title,
-  children,
-  onClose,
-}: {
-  open: boolean;
-  title: string;
-  children: React.ReactNode;
-  onClose: () => void;
-}) {
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center px-4" role="dialog" aria-modal="true">
-      <div className="absolute inset-0 bg-black/70" onClick={onClose} />
-      <div className="relative w-full max-w-xl rounded-2xl border border-white/10 bg-[#0f1115] shadow-2xl">
-        <div className="flex items-start justify-between gap-4 border-b border-white/10 p-4">
-          <div>
-            <div className="text-base font-black text-white">{title}</div>
-            <div className="mt-1 text-sm text-zinc-400">Estructura lista para escalar.</div>
-          </div>
-          <button
-            onClick={onClose}
-            className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-bold text-zinc-200 hover:bg-white/10"
-          >
-            Cerrar
-          </button>
-        </div>
-        <div className="p-4">{children}</div>
-      </div>
-    </div>
-  );
-}
-
-/* =======================
-   App
-   ======================= */
-
-export default function Home() {
-  const [tab, setTab] = useState<"buscar" | "library" | "watchlist" | "reco">("buscar");
-  const [filter, setFilter] = useState<"todas" | "no_visto" | "empezado" | "visto">("todas");
-
-  // Buscar
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Result[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
 
-  // Biblioteca / Watchlist buscador interno
-  const [listQuery, setListQuery] = useState("");
+  const [lists, setLists] = useState<Record<string, "watchlist" | "library">>(
+    {}
+  );
+  const [status, setStatus] = useState<Record<string, Status>>({});
+  const [providers, setProviders] = useState<Record<string, ProviderEntry>>(
+    {}
+  );
 
-  // Recomendaciones
-  const [reco, setReco] = useState<Result[]>([]);
-  const [recoLoading, setRecoLoading] = useState(false);
-  const [recoError, setRecoError] = useState("");
-
-  // Estado local
-  const [statusMap, setStatusMap] = useState<StatusMap>({});
-  const [saved, setSaved] = useState<SavedMap>({});
-
-  // Providers
-  const [providerMap, setProviderMap] = useState<ProviderMap>({});
-  const REGION = "ES";
-
-  // 🎲 No sé qué ver hoy
-  const [pick, setPick] = useState<Result | null>(null);
-
-  // Trakt modal
-  const [showIntegrations, setShowIntegrations] = useState(false);
-
-  /* ===== Load localStorage ===== */
+  /* -------- load localStorage -------- */
   useEffect(() => {
-    try {
-      const s = localStorage.getItem(STORAGE_STATUS);
-      if (s) setStatusMap(JSON.parse(s));
-    } catch {}
-
-    try {
-      const sv = localStorage.getItem(STORAGE_SAVED);
-      if (sv) setSaved(JSON.parse(sv));
-    } catch {}
+    setLists(JSON.parse(localStorage.getItem(STORAGE_LISTS) || "{}"));
+    setStatus(JSON.parse(localStorage.getItem(STORAGE_STATUS) || "{}"));
   }, []);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_STATUS, JSON.stringify(statusMap));
-    } catch {}
-  }, [statusMap]);
+    localStorage.setItem(STORAGE_LISTS, JSON.stringify(lists));
+  }, [lists]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_SAVED, JSON.stringify(saved));
-    } catch {}
-  }, [saved]);
+    localStorage.setItem(STORAGE_STATUS, JSON.stringify(status));
+  }, [status]);
 
-  const counts = useMemo(() => {
-    let watched = 0;
-    let started = 0;
-    for (const v of Object.values(statusMap)) {
-      if (v.status === "watched") watched++;
-      if (v.status === "started") started++;
-    }
-    const libraryCount = Object.values(saved).filter((x) => x.list === "library").length;
-    const watchlistCount = Object.values(saved).filter((x) => x.list === "watchlist").length;
+  /* -------- API -------- */
 
-    return { watched, started, libraryCount, watchlistCount };
-  }, [statusMap, saved]);
-
-  function getStatus(key: string): Status | null {
-    return statusMap[key]?.status ?? null;
+  async function searchTMDB() {
+    if (!query.trim()) return;
+    setLoading(true);
+    const r = await fetch(`/api/tmdb/search?q=${encodeURIComponent(query)}`);
+    const j = await r.json();
+    setResults(j.results || []);
+    setLoading(false);
   }
 
-  function matchesFilterByKey(key: string) {
-    const s = getStatus(key);
-    if (filter === "todas") return true;
-    if (filter === "no_visto") return s === null;
-    if (filter === "empezado") return s === "started";
-    return s === "watched";
-  }
+  async function loadProviders(r: Result) {
+    const k = keyOf(r);
+    if (providers[k]) return;
 
-  function upsertSaved(r: Result, list: ListType) {
-    const k = makeKey(r);
-    setSaved((prev) => ({
-      ...prev,
+    const res = await fetch(
+      `/api/tmdb/providers?type=${r.media_type}&id=${r.id}&region=${REGION}`
+    );
+    const data = await res.json();
+
+    if (!res.ok) return;
+
+    setProviders((p) => ({
+      ...p,
       [k]: {
-        item: {
-          id: r.id,
-          media_type: r.media_type,
-          title: r.title,
-          name: r.name,
-          release_date: r.release_date,
-          first_air_date: r.first_air_date,
-          poster_path: r.poster_path,
-          vote_average: r.vote_average,
-          popularity: r.popularity,
-        },
-        list,
-        addedTs: prev[k]?.addedTs ?? Date.now(),
+        region: data.region,
+        link: data.link,
+        providers: data.providers || [],
       },
     }));
   }
 
-  function removeSaved(key: string) {
-    setSaved((prev) => {
-      const n = { ...prev };
-      delete n[key];
-      return n;
-    });
-  }
+  /* -------- derived lists -------- */
 
-  function setStatus(r: Result, status: Status) {
-    const k = makeKey(r);
-    // al marcar estado, asegúrate de que exista en library
-    upsertSaved(r, "library");
-    setStatusMap((prev) => ({ ...prev, [k]: { status, ts: Date.now() } }));
-  }
+  const watchlist = Object.entries(lists)
+    .filter(([, v]) => v === "watchlist")
+    .map(([k]) => k);
 
-  function clearStatus(r: Result) {
-    const k = makeKey(r);
-    setStatusMap((prev) => {
-      const n = { ...prev };
-      delete n[k];
-      return n;
-    });
-  }
+  const library = Object.entries(lists)
+    .filter(([, v]) => v === "library")
+    .map(([k]) => k);
 
   /* =======================
-     Export / Import / Clear
-     ======================= */
-
-  function clearAll() {
-    if (!confirm("¿Borrar TODO (biblioteca, watchlist y estados) del navegador?")) return;
-    setStatusMap({});
-    setSaved({});
-    setPick(null);
-  }
-
-  function exportData() {
-    const payload = {
-      version: 2,
-      exportedAt: new Date().toISOString(),
-      statusMap,
-      saved,
-    };
-
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `watchcheck-backup-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  function importDataFromFile(file: File) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(String(reader.result || "{}"));
-        const nextStatus = parsed?.statusMap ?? {};
-        const nextSaved = parsed?.saved ?? {};
-        if (typeof nextStatus !== "object" || typeof nextSaved !== "object") {
-          alert("Archivo inválido (estructura incorrecta).");
-          return;
-        }
-        setStatusMap(nextStatus);
-        setSaved(nextSaved);
-        alert("Importación OK ✅");
-      } catch {
-        alert("No he podido leer el JSON.");
-      }
-    };
-    reader.readAsText(file);
-  }
-
-  function onImportInputChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    importDataFromFile(file);
-    e.target.value = "";
-  }
-
-  /* =======================
-     Providers (logos)
-     ======================= */
-
-  async function ensureProviders(r: Result) {
-    const k = makeKey(r);
-    if (providerMap[k]) return;
-
-    try {
-      const res = await fetch(
-        `/api/tmdb/providers?type=${encodeURIComponent(r.media_type)}&id=${encodeURIComponent(
-          String(r.id)
-        )}&region=${encodeURIComponent(REGION)}`,
-        { cache: "no-store" }
-      );
-      const data = await res.json();
-      if (!res.ok) return;
-
-      setProviderMap((prev) => ({
-        ...prev,
-        [k]: {
-          region: data.region || REGION,
-          providers: Array.isArray(data.providers) ? data.providers : [],
-        },
-      }));
-    } catch {
-      // silenciar (no bloquea UI)
-    }
-  }
-
-  /* =======================
-     API calls
-     ======================= */
-
-  async function search() {
-    const q = query.trim();
-    if (!q) return;
-
-    setLoading(true);
-    setError("");
-
-    try {
-      const res = await fetch(`/api/tmdb/search?q=${encodeURIComponent(q)}`, { cache: "no-store" });
-      const data = await res.json();
-
-      if (!res.ok) {
-        setResults([]);
-        setError(data?.error || `Error HTTP ${res.status}`);
-        return;
-      }
-
-      setResults(Array.isArray(data.results) ? data.results : []);
-    } catch (e: any) {
-      setResults([]);
-      setError(e?.message || "Error desconocido");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function loadRecommendations() {
-    setRecoLoading(true);
-    setRecoError("");
-
-    try {
-      const seeds = Object.entries(statusMap)
-        .sort((a, b) => (b[1]?.ts || 0) - (a[1]?.ts || 0))
-        .slice(0, 8)
-        .map(([k]) => k);
-
-      if (seeds.length === 0) {
-        setReco([]);
-        setRecoError("Marca algo como Empezado o Visto para generar recomendaciones.");
-        return;
-      }
-
-      const res = await fetch(`/api/tmdb/recommend?ids=${encodeURIComponent(seeds.join(","))}`, {
-        cache: "no-store",
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        setReco([]);
-        setRecoError(data?.error || `Error HTTP ${res.status}`);
-        return;
-      }
-
-      // no recomendar cosas ya empezadas/vistas
-      const blocked = new Set(Object.keys(statusMap));
-      const cleaned = (data.results ?? []).filter((r: Result) => !blocked.has(makeKey(r)));
-      setReco(cleaned);
-    } catch (e: any) {
-      setReco([]);
-      setRecoError(e?.message || "Error cargando recomendaciones");
-    } finally {
-      setRecoLoading(false);
-    }
-  }
-
-  /* =======================
-     Lists computed
-     ======================= */
-
-  const libraryItems = useMemo(() => {
-    return Object.entries(saved)
-      .filter(([, v]) => v.list === "library")
-      .map(([key, v]) => ({ key, ...v }))
-      .sort((a, b) => (b.addedTs || 0) - (a.addedTs || 0));
-  }, [saved]);
-
-  const watchlistItems = useMemo(() => {
-    return Object.entries(saved)
-      .filter(([, v]) => v.list === "watchlist")
-      .map(([key, v]) => ({ key, ...v }))
-      .sort((a, b) => (b.addedTs || 0) - (a.addedTs || 0));
-  }, [saved]);
-
-  function listMatchesQuery(item: Result) {
-    if (!listQuery.trim()) return true;
-    const t = titleOf(item).toLowerCase();
-    return t.includes(listQuery.toLowerCase());
-  }
-
-  /* =======================
-     🎲 No sé qué ver hoy
-     ======================= */
-
-  function pickRandomFromCurrentTab() {
-    const source = tab === "watchlist" ? watchlistItems : libraryItems;
-
-    const candidates = source
-      .filter((x) => listMatchesQuery(x.item))
-      .filter((x) => {
-        const s = getStatus(x.key);
-        if (filter === "todas") return s === null;
-        if (filter === "no_visto") return s === null;
-        if (filter === "empezado") return s === "started";
-        return s === "watched";
-      });
-
-    if (candidates.length === 0) {
-      setPick(null);
-      alert("No hay candidatos con ese filtro. Prueba 'No visto' o añade cosas a tu Watchlist.");
-      return;
-    }
-
-    const chosen = candidates[Math.floor(Math.random() * candidates.length)];
-    setPick(chosen.item);
-  }
-
-  /* =======================
-     UI Components
-     ======================= */
-
-  function TabButton({
-    active,
-    children,
-    onClick,
-  }: {
-    active?: boolean;
-    children: React.ReactNode;
-    onClick: () => void;
-  }) {
-    return (
-      <button
-        onClick={onClick}
-        className={`rounded-full px-3 py-2 text-sm font-semibold transition border ${
-          active
-            ? "bg-white/10 text-white border-white/15"
-            : "bg-transparent text-zinc-300 border-white/10 hover:bg-white/5"
-        }`}
-      >
-        {children}
-      </button>
-    );
-  }
+     UI COMPONENTS
+======================= */
 
   function ProvidersRow({ r }: { r: Result }) {
-    const k = makeKey(r);
-    const entry = providerMap[k];
-    const providers = entry?.providers || [];
+    const entry = providers[keyOf(r)];
 
-    // no bloqueamos render: si no existe aún, lo pedimos
     useEffect(() => {
-      if (!providerMap[k]) ensureProviders(r);
+      loadProviders(r);
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [k]);
+    }, []);
 
-    if (!providers.length) return null;
-
-    // mostramos hasta 5 logos
-    const shown = providers.slice(0, 5);
+    if (!entry || entry.providers.length === 0) return null;
 
     return (
-      <div className="mt-2 flex items-center gap-2">
-        <div className="text-[11px] text-zinc-500">Ver en:</div>
-        <div className="flex items-center gap-1.5">
-          {shown.map((p) => {
-            const logo = providerLogoUrl(p.logo_path);
-            if (!logo) return null;
-            return (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                key={p.provider_id}
-                src={logo}
-                alt={p.provider_name}
-                title={p.provider_name}
-                className="h-6 w-6 rounded-md border border-white/10 bg-white/5 p-1"
-              />
-            );
-          })}
+      <a
+        href={entry.link || "#"}
+        target="_blank"
+        rel="noreferrer"
+        className="mt-2 flex items-center gap-2 hover:opacity-80"
+      >
+        <span className="text-[11px] text-zinc-400">Ver en</span>
+
+        {entry.region !== REGION && (
+          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] font-bold text-zinc-300">
+            {entry.region}
+          </span>
+        )}
+
+        <div className="flex gap-1">
+          {entry.providers.slice(0, 5).map((p) => (
+            <img
+              key={p.provider_id}
+              src={providerLogo(p.logo_path) || ""}
+              alt={p.provider_name}
+              title={p.provider_name}
+              className="h-5 w-5 rounded-md border border-white/10 bg-white/5 p-0.5"
+            />
+          ))}
         </div>
-      </div>
+      </a>
     );
   }
 
-  function PosterCard({
-    r,
-    context,
-  }: {
-    r: Result;
-    context: "search" | "library" | "watchlist" | "reco";
-  }) {
-    const k = makeKey(r);
-    const s = getStatus(k);
-    if (!matchesFilterByKey(k)) return null;
-
-    const poster = posterUrl(r.poster_path);
-    const t = titleOf(r);
-    const y = yearOf(r);
-
-    const inSaved = !!saved[k];
-    const inLibrary = saved[k]?.list === "library";
-    const inWatchlist = saved[k]?.list === "watchlist";
+  function Card({ r }: { r: Result }) {
+    const k = keyOf(r);
+    const inWatchlist = lists[k] === "watchlist";
+    const inLibrary = lists[k] === "library";
 
     return (
-      <div className="group relative">
-        <div className="relative overflow-hidden rounded-xl border border-white/10 bg-white/5 shadow-sm transition group-hover:border-white/20 group-hover:shadow-lg">
-          <div className="aspect-[2/3] w-full">
-            {poster ? (
-              // eslint-disable-next-line @next/next/no-img-element
+      <div className="group">
+        <div className="overflow-hidden rounded-xl border border-white/10 bg-white/5">
+          <div className="aspect-[2/3]">
+            {posterUrl(r.poster_path) ? (
               <img
-                src={poster}
-                alt={t}
-                className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+                src={posterUrl(r.poster_path)!}
+                className="h-full w-full object-cover"
               />
             ) : (
-              <div className="h-full w-full grid place-items-center text-xs text-zinc-400">
+              <div className="grid h-full place-items-center text-zinc-500">
                 Sin póster
               </div>
             )}
           </div>
-
-          {/* Badge estado */}
-          <div className="absolute left-2 top-2">
-            <span
-              className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${badgeCls(
-                s
-              )}`}
-            >
-              {getStatusLabel(s)}
-            </span>
-          </div>
-
-          {/* Overlay hover */}
-          <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/70 via-black/10 to-transparent opacity-0 transition group-hover:opacity-100" />
-
-          {/* Acciones hover */}
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 p-3 opacity-0 transition group-hover:opacity-100">
-            <div className="pointer-events-auto flex flex-wrap gap-2">
-              <button
-                onClick={() => setStatus(r, "started")}
-                className="rounded-lg px-3 py-2 text-xs font-semibold border border-yellow-500/25 bg-yellow-500/15 text-yellow-100 hover:bg-yellow-500/20"
-              >
-                🟨 Empezado
-              </button>
-
-              <button
-                onClick={() => setStatus(r, "watched")}
-                className="rounded-lg px-3 py-2 text-xs font-semibold border border-green-500/25 bg-green-500/15 text-green-100 hover:bg-green-500/20"
-              >
-                ✅ Visto
-              </button>
-
-              <button
-                onClick={() => clearStatus(r)}
-                className="rounded-lg px-3 py-2 text-xs font-semibold border border-white/10 bg-white/5 text-zinc-100 hover:bg-white/10"
-              >
-                Quitar estado
-              </button>
-
-              {(context === "search" || context === "reco") && (
-                <>
-                  <button
-                    onClick={() => upsertSaved(r, "watchlist")}
-                    className="rounded-lg px-3 py-2 text-xs font-semibold border border-white/10 bg-white/5 text-zinc-100 hover:bg-white/10"
-                  >
-                    ➕ Watchlist
-                  </button>
-                  <button
-                    onClick={() => upsertSaved(r, "library")}
-                    className="rounded-lg px-3 py-2 text-xs font-semibold border border-white/10 bg-white/5 text-zinc-100 hover:bg-white/10"
-                  >
-                    ➕ Biblioteca
-                  </button>
-                </>
-              )}
-
-              {inSaved && (
-                <>
-                  {inWatchlist && (
-                    <button
-                      onClick={() => upsertSaved(r, "library")}
-                      className="rounded-lg px-3 py-2 text-xs font-semibold border border-white/10 bg-white/5 text-zinc-100 hover:bg-white/10"
-                    >
-                      Mover a Biblioteca
-                    </button>
-                  )}
-
-                  {inLibrary && (
-                    <button
-                      onClick={() => upsertSaved(r, "watchlist")}
-                      className="rounded-lg px-3 py-2 text-xs font-semibold border border-white/10 bg-white/5 text-zinc-100 hover:bg-white/10"
-                    >
-                      Mover a Watchlist
-                    </button>
-                  )}
-
-                  <button
-                    onClick={() => removeSaved(k)}
-                    className="rounded-lg px-3 py-2 text-xs font-semibold border border-white/10 bg-white/5 text-zinc-100 hover:bg-white/10"
-                  >
-                    Quitar de lista
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
         </div>
 
         <div className="mt-2">
-          <div className="truncate text-sm font-bold text-white">{t}</div>
-          <div className="mt-0.5 text-xs text-zinc-400">
-            {labelOf(r)} · {y}
-            {typeof r.vote_average === "number" ? (
-              <span className="ml-2 text-zinc-500">★ {r.vote_average.toFixed(1)}</span>
-            ) : null}
-            {inWatchlist ? <span className="ml-2 text-zinc-500">• Watchlist</span> : null}
-            {inLibrary ? <span className="ml-2 text-zinc-500">• Biblioteca</span> : null}
+          <div className="truncate text-sm font-bold">{titleOf(r)}</div>
+          <div className="text-xs text-zinc-400">
+            {yearOf(r)} · {r.media_type === "movie" ? "Movie" : "TV"}
           </div>
 
-          {/* Logos plataformas */}
           <ProvidersRow r={r} />
+
+          <div className="mt-2 flex flex-wrap gap-1">
+            <button
+              onClick={() =>
+                setLists((l) => ({ ...l, [k]: "watchlist" }))
+              }
+              className="rounded-md bg-white/5 px-2 py-1 text-xs hover:bg-white/10"
+            >
+              ➕ Watchlist
+            </button>
+
+            <button
+              onClick={() => setLists((l) => ({ ...l, [k]: "library" }))}
+              className="rounded-md bg-white/5 px-2 py-1 text-xs hover:bg-white/10"
+            >
+              ➕ Biblioteca
+            </button>
+
+            <button
+              onClick={() =>
+                setStatus((s) => ({ ...s, [k]: "watched" }))
+              }
+              className="rounded-md bg-green-500/20 px-2 py-1 text-xs text-green-200"
+            >
+              ✅ Visto
+            </button>
+          </div>
         </div>
       </div>
     );
   }
 
   /* =======================
-     Render
-     ======================= */
+     RENDER
+======================= */
 
   return (
     <main className="min-h-screen bg-[#0f1115] text-white">
-      <Modal open={showIntegrations} title="Conectar Trakt (escalable)" onClose={() => setShowIntegrations(false)}>
-        <div className="space-y-4 text-zinc-300">
-          <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-            <div className="font-bold text-white">Qué aporta Trakt</div>
-            <ul className="mt-2 list-disc pl-5 space-y-1 text-sm">
-              <li>Sincronizar <span className="font-semibold text-white">Visto/Empezado/Watchlist</span> en la nube.</li>
-              <li>Usar la app en móvil/portátil sin depender de localStorage.</li>
-              <li>Base sólida para “conectar plataformas” de forma realista (hub).</li>
-            </ul>
-          </div>
-          <button
-            onClick={() => setShowIntegrations(false)}
-            className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-bold text-zinc-100 hover:bg-white/10"
-          >
-            Vale
-          </button>
-        </div>
-      </Modal>
-
-      {/* Header (optimizado móvil) */}
       <header className="sticky top-0 z-10 border-b border-white/10 bg-[#0f1115]/80 backdrop-blur">
-        <div className="mx-auto max-w-6xl px-4 sm:px-5 py-4">
-          {/* fila 1 */}
-          <div className="flex items-start justify-between gap-3">
-            {/* Logo */}
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="h-10 w-10 rounded-xl border border-white/10 bg-white/5 grid place-items-center shrink-0">
-                <svg
-                  viewBox="0 0 24 24"
-                  className="h-6 w-6 text-white/90"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M20 6L9 17l-5-5" />
-                </svg>
-              </div>
-
-              <div className="min-w-0">
-                <div className="truncate text-lg font-black tracking-tight">WatchCheck</div>
-                <div className="hidden sm:block text-xs text-zinc-400">
-                  Tu control de “visto” + plataformas
-                </div>
+        <div className="mx-auto max-w-6xl px-4 py-4">
+          <div className="flex items-center gap-3">
+            <div className="h-10 w-10 rounded-xl border border-white/10 bg-white/5 grid place-items-center">
+              ✓
+            </div>
+            <div>
+              <div className="text-lg font-black">WatchCheck</div>
+              <div className="text-xs text-zinc-400">
+                Controla qué ves y dónde
               </div>
             </div>
+          </div>
 
-            {/* Acciones: en móvil, agrupadas */}
-            <div className="flex items-center gap-2 shrink-0">
+          <div className="mt-4 flex gap-2 flex-wrap">
+            {[
+              ["search", "Buscar"],
+              ["watchlist", "Watchlist"],
+              ["library", "Biblioteca"],
+            ].map(([k, l]) => (
               <button
-                onClick={() => setShowIntegrations(true)}
-                className="hidden sm:inline-flex rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
+                key={k}
+                onClick={() => setTab(k as any)}
+                className={`rounded-full px-4 py-2 text-sm font-semibold ${
+                  tab === k
+                    ? "bg-white/10"
+                    : "bg-white/5 hover:bg-white/10"
+                }`}
               >
-                🔗 Trakt
+                {l}
               </button>
-
-              {/* Menú móvil */}
-              <details className="sm:hidden">
-                <summary className="list-none cursor-pointer rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10">
-                  ⋯
-                </summary>
-                <div className="absolute right-4 mt-2 w-52 rounded-2xl border border-white/10 bg-[#0f1115] shadow-2xl p-2">
-                  <button
-                    onClick={() => setShowIntegrations(true)}
-                    className="w-full text-left rounded-xl px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
-                  >
-                    🔗 Conectar Trakt
-                  </button>
-                  <button
-                    onClick={exportData}
-                    className="w-full text-left rounded-xl px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
-                  >
-                    Exportar
-                  </button>
-                  <label className="block cursor-pointer rounded-xl px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10">
-                    Importar
-                    <input
-                      type="file"
-                      accept="application/json"
-                      className="hidden"
-                      onChange={onImportInputChange}
-                    />
-                  </label>
-                  <button
-                    onClick={clearAll}
-                    className="w-full text-left rounded-xl px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
-                  >
-                    Borrar todo
-                  </button>
-                </div>
-              </details>
-
-              {/* Desktop actions */}
-              <div className="hidden sm:flex items-center gap-2">
-                <button
-                  onClick={exportData}
-                  className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
-                >
-                  Exportar
-                </button>
-
-                <label className="cursor-pointer rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10">
-                  Importar
-                  <input
-                    type="file"
-                    accept="application/json"
-                    className="hidden"
-                    onChange={onImportInputChange}
-                  />
-                </label>
-
-                <button
-                  onClick={clearAll}
-                  className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
-                >
-                  Borrar todo
-                </button>
-              </div>
-            </div>
+            ))}
           </div>
 
-          {/* fila 2: contadores (scroll en móvil) */}
-          <div className="mt-3 flex gap-2 overflow-x-auto no-scrollbar pb-1">
-            <span className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-semibold text-zinc-200">
-              📚 {counts.libraryCount}
-            </span>
-            <span className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-semibold text-zinc-200">
-              🧾 {counts.watchlistCount}
-            </span>
-            <span className="shrink-0 rounded-full border border-green-500/25 bg-green-500/10 px-3 py-1.5 text-sm font-semibold text-green-100">
-              ✅ {counts.watched}
-            </span>
-            <span className="shrink-0 rounded-full border border-yellow-500/25 bg-yellow-500/10 px-3 py-1.5 text-sm font-semibold text-yellow-100">
-              🟨 {counts.started}
-            </span>
-            <span className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-semibold text-zinc-400">
-              🇪🇸 Providers: {REGION}
-            </span>
-          </div>
-
-          {/* tabs + filtro (wrap en móvil) */}
-          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-            <div className="flex flex-wrap gap-2">
-              <TabButton active={tab === "buscar"} onClick={() => setTab("buscar")}>
-                Buscar
-              </TabButton>
-              <TabButton
-                active={tab === "watchlist"}
-                onClick={() => {
-                  setTab("watchlist");
-                  setPick(null);
-                }}
-              >
-                Watchlist
-              </TabButton>
-              <TabButton
-                active={tab === "library"}
-                onClick={() => {
-                  setTab("library");
-                  setPick(null);
-                }}
-              >
-                Biblioteca
-              </TabButton>
-              <TabButton
-                active={tab === "reco"}
-                onClick={() => {
-                  setTab("reco");
-                  setPick(null);
-                  loadRecommendations();
-                }}
-              >
-                Recomendaciones
-              </TabButton>
-            </div>
-
-            <div className="sm:ml-auto flex items-center gap-2">
-              <span className="text-sm font-semibold text-zinc-300">Filtro:</span>
-              <select
-                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-zinc-100 outline-none"
-                value={filter}
-                onChange={(e) => {
-                  setFilter(e.target.value as any);
-                  setPick(null);
-                }}
-              >
-                <option value="todas">Todas</option>
-                <option value="no_visto">Solo no visto</option>
-                <option value="empezado">Solo empezado</option>
-                <option value="visto">Solo visto</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Search bar */}
-          {tab === "buscar" && (
-            <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+          {tab === "search" && (
+            <div className="mt-4 flex gap-2">
               <input
-                className="w-full flex-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 sm:px-5 sm:py-4 text-base font-semibold text-white placeholder:text-zinc-500 outline-none focus:border-white/20"
-                placeholder="Buscar: Matrix, Dune, Breaking Bad…"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && search()}
+                onKeyDown={(e) => e.key === "Enter" && searchTMDB()}
+                placeholder="Buscar Matrix, Dune, Breaking Bad…"
+                className="flex-1 rounded-xl border border-white/10 bg-white/5 px-4 py-3"
               />
               <button
-                onClick={search}
-                disabled={loading}
-                className="rounded-2xl bg-white text-black px-6 py-3 sm:py-4 font-black hover:bg-zinc-200 disabled:opacity-60"
+                onClick={searchTMDB}
+                className="rounded-xl bg-white px-6 py-3 text-black font-bold"
               >
-                {loading ? "Buscando…" : "Buscar"}
-              </button>
-            </div>
-          )}
-
-          {/* List search + 🎲 */}
-          {(tab === "watchlist" || tab === "library") && (
-            <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
-              <input
-                className="w-full flex-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 sm:px-5 sm:py-4 text-base font-semibold text-white placeholder:text-zinc-500 outline-none focus:border-white/20"
-                placeholder={tab === "watchlist" ? "Buscar en Watchlist…" : "Buscar en Biblioteca…"}
-                value={listQuery}
-                onChange={(e) => {
-                  setListQuery(e.target.value);
-                  setPick(null);
-                }}
-              />
-              <button
-                onClick={pickRandomFromCurrentTab}
-                className="rounded-2xl border border-white/10 bg-white/5 px-6 py-3 sm:py-4 font-black text-zinc-100 hover:bg-white/10"
-              >
-                🎲 No sé qué ver hoy
+                Buscar
               </button>
             </div>
           )}
         </div>
       </header>
 
-      {/* Content */}
-      <section className="mx-auto max-w-6xl px-4 sm:px-5 py-8">
-        {/* Picker result */}
-        {(tab === "watchlist" || tab === "library") && pick && (
-          <div className="mb-6 rounded-2xl border border-white/10 bg-white/5 p-4">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-center gap-4 min-w-0">
-                <div className="h-16 w-12 overflow-hidden rounded-lg border border-white/10 bg-white/10 flex-shrink-0">
-                  {posterUrl(pick.poster_path) ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={posterUrl(pick.poster_path)!}
-                      alt={titleOf(pick)}
-                      className="h-full w-full object-cover"
-                    />
-                  ) : null}
-                </div>
-                <div className="min-w-0">
-                  <div className="truncate text-lg font-black">{titleOf(pick)}</div>
-                  <div className="text-sm text-zinc-400">
-                    {labelOf(pick)} · {yearOf(pick)}
-                  </div>
-                </div>
-              </div>
+      <section className="mx-auto max-w-6xl px-4 py-6 grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-4">
+        {(tab === "search" ? results : tab === "watchlist"
+          ? results.filter((r) => watchlist.includes(keyOf(r)))
+          : results.filter((r) => library.includes(keyOf(r)))
+        ).map((r) => (
+          <Card key={keyOf(r)} r={r} />
+        ))}
 
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={() => setStatus(pick, "started")}
-                  className="rounded-xl px-4 py-2 text-sm font-bold border border-yellow-500/25 bg-yellow-500/15 text-yellow-100 hover:bg-yellow-500/20"
-                >
-                  🟨 Empezado
-                </button>
-                <button
-                  onClick={() => setStatus(pick, "watched")}
-                  className="rounded-xl px-4 py-2 text-sm font-bold border border-green-500/25 bg-green-500/15 text-green-100 hover:bg-green-500/20"
-                >
-                  ✅ Visto
-                </button>
-                <button
-                  onClick={() => setPick(null)}
-                  className="rounded-xl px-4 py-2 text-sm font-bold border border-white/10 bg-white/5 text-zinc-100 hover:bg-white/10"
-                >
-                  Cerrar
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Errors */}
-        {tab === "buscar" && error && (
-          <div className="mb-6 rounded-2xl border border-red-500/20 bg-red-500/10 p-4 text-red-100 font-semibold">
-            {error}
-          </div>
-        )}
-
-        {tab === "reco" && recoError && (
-          <div className="mb-6 rounded-2xl border border-red-500/20 bg-red-500/10 p-4 text-red-100 font-semibold">
-            {recoError}
-          </div>
-        )}
-
-        {/* Empty states */}
-        {tab === "watchlist" && watchlistItems.length === 0 && (
-          <div className="text-zinc-400">
-            Tu Watchlist está vacía. Añade títulos desde Buscar o Recomendaciones (➕ Watchlist).
-          </div>
-        )}
-
-        {tab === "library" && libraryItems.length === 0 && (
-          <div className="text-zinc-400">
-            Tu Biblioteca está vacía. Marca “Empezado/Visto” o añade (➕ Biblioteca).
-          </div>
-        )}
-
-        {tab === "buscar" && !loading && !error && results.length === 0 && query.trim() !== "" && (
-          <div className="text-zinc-400">Sin resultados.</div>
-        )}
-
-        {tab === "reco" && !recoLoading && !recoError && reco.length === 0 && (
-          <div className="text-zinc-400">Sin recomendaciones (por ahora).</div>
-        )}
-
-        {/* Grids (móvil: 3 columnas) */}
-        {tab === "buscar" && (
-          <div className="mt-4 grid grid-cols-3 gap-3 sm:grid-cols-4 sm:gap-4 md:grid-cols-5 lg:grid-cols-6">
-            {loading
-              ? Array.from({ length: 12 }).map((_, i) => <PosterSkeleton key={`s-${i}`} />)
-              : results.map((r) => <PosterCard key={makeKey(r)} r={r} context="search" />)}
-          </div>
-        )}
-
-        {tab === "watchlist" && (
-          <div className="mt-4 grid grid-cols-3 gap-3 sm:grid-cols-4 sm:gap-4 md:grid-cols-5 lg:grid-cols-6">
-            {watchlistItems
-              .filter((x) => matchesFilterByKey(x.key))
-              .filter((x) => listMatchesQuery(x.item))
-              .map((x) => (
-                <PosterCard key={x.key} r={x.item} context="watchlist" />
-              ))}
-          </div>
-        )}
-
-        {tab === "library" && (
-          <div className="mt-4 grid grid-cols-3 gap-3 sm:grid-cols-4 sm:gap-4 md:grid-cols-5 lg:grid-cols-6">
-            {libraryItems
-              .filter((x) => matchesFilterByKey(x.key))
-              .filter((x) => listMatchesQuery(x.item))
-              .map((x) => (
-                <PosterCard key={x.key} r={x.item} context="library" />
-              ))}
-          </div>
-        )}
-
-        {tab === "reco" && (
-          <>
-            <div className="mb-4 flex items-center justify-between">
-              <div className="text-sm text-zinc-400">
-                Basado en lo último que has marcado como visto/empezado.
-              </div>
-              <button
-                onClick={loadRecommendations}
-                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10"
-                disabled={recoLoading}
-              >
-                {recoLoading ? "Actualizando…" : "Actualizar"}
-              </button>
-            </div>
-
-            <div className="mt-2 grid grid-cols-3 gap-3 sm:grid-cols-4 sm:gap-4 md:grid-cols-5 lg:grid-cols-6">
-              {recoLoading
-                ? Array.from({ length: 12 }).map((_, i) => <PosterSkeleton key={`r-${i}`} />)
-                : reco
-                    .filter((r) => matchesFilterByKey(makeKey(r)))
-                    .map((r) => <PosterCard key={makeKey(r)} r={r} context="reco" />)}
-            </div>
-          </>
-        )}
+        {loading && <div className="text-zinc-400">Cargando…</div>}
       </section>
-
-      {/* helper: hide scrollbar */}
-      <style jsx global>{`
-        .no-scrollbar::-webkit-scrollbar {
-          display: none;
-        }
-        .no-scrollbar {
-          -ms-overflow-style: none;
-          scrollbar-width: none;
-        }
-      `}</style>
     </main>
   );
 }
